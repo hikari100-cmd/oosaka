@@ -1,0 +1,199 @@
+Sub ImportTextFilesAllowDuplicatesByTime()
+    Dim folderPath As String
+    Dim fileSystem As Object
+    Dim folder As Object
+    Dim file As Object
+    Dim fileList As Object
+    Dim sortedFiles() As String
+    Dim fileCount As Long
+    Dim i As Long
+    Dim rowNum As Long
+    Dim currentMessage As String
+    Dim isMessage As Boolean
+    Dim ws As Worksheet
+
+    ' Excelワークシートの参照
+    Set ws = ThisWorkbook.Sheets(1)
+    
+    ' フォルダパスを設定
+    folderPath = "C:\work\emall\"
+    If Right(folderPath, 1) <> "\" Then folderPath = folderPath & "\"
+
+    ' ファイルシステムオブジェクトの初期化
+    Set fileSystem = CreateObject("Scripting.FileSystemObject")
+    Set folder = fileSystem.GetFolder(folderPath)
+    Set fileList = CreateObject("Scripting.Dictionary")
+
+    ' フォルダ内のテキストファイルを取得
+    For Each file In folder.Files
+        If LCase(fileSystem.GetExtensionName(file.Name)) = "txt" Then
+            fileList.Add file.Path, file.DateCreated
+        End If
+    Next file
+
+    ' ファイルが存在しない場合は終了
+    If fileList.Count = 0 Then
+        MsgBox "指定されたフォルダにテキストファイルがありません。", vbExclamation
+        Exit Sub
+    End If
+
+    ' ファイルの作成日時でソート
+    sortedFiles = SortFilesByDate(fileList)
+
+    ' データ入力の開始行を設定
+    rowNum = FindNextEmptyRow(ws)
+
+    ' 重複確認: 既に処理されたファイルの作成日時と内容を基準に確認
+    Dim processedEntries As Object
+    Set processedEntries = CreateObject("Scripting.Dictionary")
+    
+    ' ソートされたファイルリストを処理
+    For i = LBound(sortedFiles) To UBound(sortedFiles)
+        Dim lines() As String
+        Dim filePath As String
+        Dim fileContent As String
+        Dim fileCreated As String
+
+        filePath = sortedFiles(i)
+        fileCreated = fileList(filePath) ' ファイル作成日時
+
+        fileContent = ReadUTF8File(filePath)
+        If fileContent = "" Then
+            MsgBox "ファイルを読み取ることができません: " & filePath, vbExclamation
+            Continue For
+        End If
+
+        ' ユニークキーの作成: 作成日時とファイル内容
+        Dim uniqueKey As String
+        uniqueKey = fileCreated & "|" & fileContent
+
+        If processedEntries.exists(uniqueKey) Then
+            ' 既に処理されたファイルの場合はスキップ
+            Continue For
+        End If
+
+        ' テキストファイルの各行を配列に分割
+        lines = Split(fileContent, vbCrLf)
+        isMessage = False
+        currentMessage = ""
+
+        ' 各行を処理
+        For Each line In lines
+            line = Trim(line)
+
+            ' メッセージ収集モード
+            If isMessage Then
+                If line <> "" Then
+                    currentMessage = currentMessage & line & vbCrLf
+                End If
+                Continue For
+            End If
+
+            ' キーワードに基づいてデータを処理
+            If InStr(line, "参加形式:") > 0 Then
+                ws.Cells(rowNum, 2).Value = Replace(line, "参加形式:", "")
+            ElseIf InStr(line, "名前:") > 0 Then
+                ws.Cells(rowNum, 3).Value = Replace(line, "名前:", "")
+            ElseIf InStr(line, "メールアドレス:") > 0 Then
+                Dim email As String
+                email = Replace(line, "メールアドレス:", "")
+                ws.Cells(rowNum, 4).Value = email
+                ws.Cells(rowNum, 5).Value = email ' E列にも同じ値を入力
+            ElseIf InStr(line, "電話番号:") > 0 Then
+                ws.Cells(rowNum, 6).Value = Replace(line, "電話番号:", "")
+            ElseIf InStr(line, "メッセージ:") > 0 Then
+                isMessage = True ' メッセージ収集開始
+            End If
+        Next line
+
+        ' メッセージデータの入力
+        If currentMessage <> "" Then
+            ws.Cells(rowNum, 7).Value = currentMessage
+            ws.Cells(rowNum, 8).Value = fileSystem.GetFile(filePath).DateCreated ' H列にファイル作成日時を入力
+            ws.Cells(rowNum, 1).Value = rowNum - 3 ' A列: 番号
+        End If
+
+        ' ユニークキーを記録して重複を防止
+        processedEntries.Add uniqueKey, True
+
+        ' 次の行に移動
+        rowNum = rowNum + 1
+    Next i
+
+    MsgBox "データを正常にインポートしました!", vbInformation
+End Sub
+
+' ファイル作成日時でソート
+Function SortFilesByDate(fileList As Object) As String()
+    Dim sortedKeys() As String
+    Dim sortedDates() As Date
+    Dim i As Long, j As Long
+    Dim tempKey As String
+    Dim tempDate As Date
+
+    ' ファイルパスと日時を配列に格納
+    ReDim sortedKeys(fileList.Count - 1)
+    ReDim sortedDates(fileList.Count - 1)
+
+    i = 0
+    For Each key In fileList.Keys
+        sortedKeys(i) = key
+        sortedDates(i) = fileList(key)
+        i = i + 1
+    Next key
+
+    ' バブルソート (日時基準の昇順)
+    For i = LBound(sortedDates) To UBound(sortedDates) - 1
+        For j = i + 1 To UBound(sortedDates)
+            If sortedDates(i) > sortedDates(j) Then
+                tempDate = sortedDates(i)
+                sortedDates(i) = sortedDates(j)
+                sortedDates(j) = tempDate
+
+                tempKey = sortedKeys(i)
+                sortedKeys(i) = sortedKeys(j)
+                sortedKeys(j) = tempKey
+            End If
+        Next j
+    Next i
+
+    SortFilesByDate = sortedKeys
+End Function
+
+' UTF-8ファイルを読み取る関数
+Function ReadUTF8File(filePath As String) As String
+    Dim stream As Object
+    Dim fileContent As String
+
+    On Error GoTo ErrorHandler
+
+    ' ADODB.Streamを使用してUTF-8ファイルを読み取る
+    Set stream = CreateObject("ADODB.Stream")
+    stream.Type = 2 ' TextStreamモード
+    stream.Charset = "utf-8" ' UTF-8設定
+    stream.Open
+    stream.LoadFromFile filePath
+    fileContent = stream.ReadText
+    stream.Close
+
+    ReadUTF8File = fileContent
+    Exit Function
+
+ErrorHandler:
+    ReadUTF8File = ""
+    If Not stream Is Nothing Then stream.Close
+End Function
+
+' 空行を探す関数
+Function FindNextEmptyRow(ws As Worksheet) As Long
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row ' A列の最終行を探す
+
+    If lastRow < 4 Then
+        ' データがない場合、デフォルトの行番号は4
+        FindNextEmptyRow = 4
+    Else
+        ' 最終行の次の空行を返す
+        FindNextEmptyRow = lastRow + 1
+    End If
+End Function
